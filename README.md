@@ -73,5 +73,86 @@ QMan is built for reliability in embedded systems:
 | 1 | QMAN_ERR_POOL_OVERFLOW | Dynamic queue is full. System will reboot. |
 | 2 | QMAN_WARN_STATIC_LIMIT | Total defined tasks exceed pool size. Check your memory! |
 
+## Comparison with other Schedulers
+
+
+| Feature | QMan | AceRoutine | GyverOS | TaskScheduler | Protothreads | FreeRTOS |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Programming Style** | **DSL (Async-like)** | C++ Classes | Polling | Callbacks | Macros/Switch | Task Functions |
+| **RAM Usage** | **Extremely Low** | Medium | Low | Medium | Low | Very High |
+| **Context Saving** | **Yes (Zero-stack)** | Yes | No | No | Yes | Yes (Full stack) |
+| **Safety Guards** | **WDT / OnError** | None | None | None | None | HardFault |
+| **Time Rollover** | **Immune (38h)** | millis() based | millis() | millis() drift | Manual check | Tick-based |
+
+---
+
+## Code Style Examples (Blink Task)
+
+### 1. QMan (Efficient & Linear)
+Linear code, no global flags needed. Best for 8-bit MCUs.
+```cpp
+QMAN_TASK(blink) {
+  QMAN_INIT { pinMode(13, OUTPUT); }
+  QMAN_LOOP {
+    digitalWrite(13, !digitalRead(13));
+    QMAN_SLEEP_MS(500);
+  }
+}
+```
+
+### 2. AceRoutine (Modern OO)
+Uses C++ classes. Good, but higher RAM overhead due to object-oriented design.
+```cpp
+COROUTINE(blink) {
+  COROUTINE_LOOP() {
+    digitalWrite(13, !digitalRead(13));
+    COROUTINE_DELAY(500);
+  }
+}
+```
+
+### 3. GyverOS (Polling Style)
+Lightweight but requires manual state management (global flags) for complex logic.
+```cpp
+void task() {
+  static bool state;
+  digitalWrite(13, state = !state);
+}
+// Logic: OS.attach(0, task, 500);
+```
+
+### 4. TaskScheduler (The Popular)
+No context saving. Tasks must be broken down into many separate callback functions.
+```cpp
+void blinkCb() { digitalWrite(13, !digitalRead(13)); }
+Task t1(500, TASK_FOREVER, &blinkCb);
+```
+
+### 5. Protothreads (The Ancestor)
+Low-level macros. Lacks a built-in scheduler; you must run each thread manually in loop().
+```cpp
+PT_THREAD(blink(struct pt *p)) {
+  PT_BEGIN(p);
+  while(1) {
+    digitalWrite(13, !digitalRead(13));
+    PT_WAIT_UNTIL(p, millis() - last > 500);
+    last = millis();
+  }
+  PT_END(p);
+}
+```
+
+### 6. FreeRTOS (The Professional)
+Preemptive multitasking. Powerful, but consumes ~150 bytes of RAM per task.
+```cpp
+void vBlink(void *pv) {
+  for(;;) {
+    digitalWrite(13, !digitalRead(13));
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+  }
+}
+```
+
+
 ---
 Created by developers for the Arduino community.
