@@ -1,17 +1,31 @@
 /**
  * QMan (Queue Manager) Implementation
- * Correctly handles time accumulation and provides global state variables.
+ * 
+ * This file contains the global variables and the main instance of the 
+ * manager. These variables are placed here to ensure they exist only once 
+ * in the final firmware.
  */
 
 #include "QMan.h"
 
-// Static task registration counter
+/**
+ * Global task counter.
+ * Incremented by QManCounter objects before main() starts.
+ * Used to check if the number of tasks exceeds the POOL_SIZE.
+ */
 uint8_t qman_total_tasks = 0;
 
-// Global time accumulators used by QMAN_TICK() macro
+/**
+ * Time accumulation variables.
+ * Used by the QMAN_TICK() macro to track micros() and convert them 
+ * into stable 32-bit ticks, handling clock rollover automatically.
+ */
 uint32_t qman_last_micros = 0;
 uint32_t qman_task_ticks = 0;
 
-// Global instance of the Queue Manager.
-// Starts with 0 ticks to ensure full 32-bit rollover compatibility.
+/**
+ * The main Queue Manager instance.
+ * Initialized with 0 ticks. The first call to QMAN_TICK() will synchronize
+ * the internal clock with the hardware timer.
+ */
 QMan qman(0);
