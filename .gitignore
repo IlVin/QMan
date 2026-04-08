@@ -1,4 +1,4 @@
-# Prerequisites
+# Prerequisites - dependency files
 *.d
 
 # Compiled Object files
@@ -11,10 +11,8 @@
 *.gch
 *.pch
 
-# Linker files
+# Linker and Debugger output files
 *.ilk
-
-# Debugger Files
 *.pdb
 
 # Compiled Dynamic libraries
@@ -32,10 +30,35 @@
 *.a
 *.lib
 
-# Executables
+# Executables and build artifacts
 *.exe
 *.out
 *.app
+*.elf
+*.hex
+*.bin
 
-# debug information files
+# Debug information files
 *.dwo
+
+# Local build directories
+build/
+bin/
+
+# PlatformIO project files
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# IDE and Editor configuration files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
