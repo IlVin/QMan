@@ -16,16 +16,8 @@
 uint8_t qman_total_tasks = 0;
 
 /**
- * Time accumulation variables.
- * Used by the QMAN_TICK() macro to track micros() and convert them 
- * into stable 32-bit ticks, handling clock rollover automatically.
- */
-uint32_t qman_last_micros = 0;
-uint32_t qman_task_ticks = 0;
-
-/**
  * The main Queue Manager instance.
  * Initialized with 0 ticks. The first call to QMAN_TICK() will synchronize
  * the internal clock with the hardware timer.
  */
-QMan qman(0);
+QMan qman;

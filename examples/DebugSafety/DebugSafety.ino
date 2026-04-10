@@ -11,7 +11,7 @@
 #include <QMan.h>
 
 // Initialize counter (required in main sketch)
-uint8_t qman_total_tasks = 0;
+extern uint8_t qman_total_tasks;
 
 // --- Safety Callbacks ---
 
@@ -35,7 +35,7 @@ void myErrorHandler(uint8_t code) {
 // --- Tasks ---
 
 // Generate 7 tasks to trigger OnWarning (since POOL_SIZE is 5)
-#define DECLARE_DUMMY(n) QMAN_TASK(task_##n) { QMAN_INIT{} QMAN_LOOP{ QMAN_SLEEP_MS(1000); } }
+#define DECLARE_DUMMY(n) QMAN_TASK(task_##n) { QMAN_INIT{} QMAN_LOOP{ QMAN_SLEEP(1000_ms); } }
 
 DECLARE_DUMMY(1) DECLARE_DUMMY(2) DECLARE_DUMMY(3) DECLARE_DUMMY(4)
 DECLARE_DUMMY(5) DECLARE_DUMMY(6) DECLARE_DUMMY(7)
@@ -55,7 +55,7 @@ void setup() {
     // Attempt to start more tasks than POOL_SIZE (5)
     for (uint8_t i = 0; i < 7; i++) {
         Serial.print(F("Starting task #")); Serial.println(i + 1);
-        QMAN_GO(taskList[i], 0);
+        QMAN_GO(taskList[i]);
         
         Serial.print(F("Tasks in queue: ")); Serial.println(qman.Len());
         delay(500);

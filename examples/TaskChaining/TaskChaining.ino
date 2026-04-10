@@ -20,9 +20,9 @@ QMAN_TASK(taskWorker) {
 
         for (count = 0; count < 5; count++) {
             digitalWrite(LED_BUILTIN, HIGH);
-            QMAN_SLEEP_MS(100);
+            QMAN_SLEEP(100_ms);
             digitalWrite(LED_BUILTIN, LOW);
-            QMAN_SLEEP_MS(100);
+            QMAN_SLEEP(100_ms);
         }
 
         Serial.println(F("Worker: Sequence complete. Self-terminating..."));
@@ -50,12 +50,12 @@ QMAN_TASK(taskBoss) {
             Serial.println(F("Boss: Condition met! Starting Worker..."));
             
             // Trigger the worker task. It will always start from the top thanks to QMAN_STOP.
-            QMAN_GO(taskWorker, 0);
+            QMAN_GO(taskWorker);
             
             secondsElapsed = 0;
         }
 
-        QMAN_SLEEP_MS(1000);
+        QMAN_SLEEP(1000_ms);
     }
 }
 
@@ -64,7 +64,7 @@ void setup() {
     while(!Serial);
     
     // Start only the Boss
-    QMAN_GO(taskBoss, 0);
+    QMAN_GO(taskBoss);
 }
 
 void loop() {

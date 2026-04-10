@@ -19,7 +19,7 @@ QMAN_TASK(taskSleep) {
         
         // SLEEP will wait 1000ms STARTING FROM NOW.
         // Total period will be ~1100ms.
-        QMAN_SLEEP_MS(1000); 
+        QMAN_SLEEP(1000_ms); 
     }
 }
 
@@ -34,7 +34,7 @@ QMAN_TASK(taskDuty) {
         
         // DUTY will wait 900ms, because 100ms was already spent on work.
         // Total period will be EXACTLY 1000ms.
-        QMAN_DUTY_MS(1000); 
+        QMAN_DUTY(1000_ms); 
     }
 }
 
@@ -43,8 +43,8 @@ void setup() {
     while(!Serial);
     
     // Start both tasks to compare their timestamps in Serial
-    QMAN_GO(taskSleep, 0);
-    QMAN_GO(taskDuty, 0);
+    QMAN_GO(taskSleep);
+    QMAN_GO(taskDuty);
 }
 
 void loop() {
