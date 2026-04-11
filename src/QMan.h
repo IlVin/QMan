@@ -200,6 +200,7 @@ inline uint32_t qman_get_delta_ticks() {
 #define QMAN_SLEEP_2(qtime) \
     do { \
         __resumeAddr = (void*)&&QMAN_JOIN(L_, __LINE__); \
+        qman.Sync(qman_get_delta_ticks()); \
         qman.Sleep(qtime); \
         return false; \
         QMAN_JOIN(L_, __LINE__): ; \
@@ -218,9 +219,8 @@ inline uint32_t qman_get_delta_ticks() {
 #define QMAN_DUTY(qtime) \
     do { \
         __resumeAddr = (void*)&&QMAN_JOIN(L_, __LINE__); \
-        uint32_t current = qman.Now(); \
-        uint32_t started = qman.Started(); \
-        uint32_t elapsed = current - started; \
+        qman.Sync(qman_get_delta_ticks()); /* Подтягиваем время к текущему моменту */ \
+        uint32_t elapsed = qman.Now() - qman.Started(); \
         uint32_t wait = (elapsed < qtime.ticks) ? (qtime.ticks - elapsed) : 0; \
         qman.Sleep(QTime(wait)); \
         return false; \
@@ -315,6 +315,7 @@ private:
 
         if (oldIdx != target) {
             Task temp = pool[oldIdx];
+            temp.nextRun = nextRun;
             if (oldIdx > target) {
                 memmove(&pool[target + 1], &pool[target], sizeof(Task) * (oldIdx - target));
             } else {
@@ -343,6 +344,11 @@ public:
                                currentTask(nullptr), onError(nullptr), onWarning(nullptr) {
     }
 
+    void Sync(uint32_t delta) {
+        QManGuard guard;
+        now += delta;
+    }
+
     /**
      * Call this at the end of setup() to sync internal clock
      * with hardware timers before the first loop.
@@ -351,7 +357,7 @@ public:
         // We don't care about the first delta, we just use it
         // to set the baseline for 'now' and 'lastRaw'.
         qman_setup_hw();
-        Tick(QTime(qman_get_delta_ticks()));
+        Sync(qman_get_delta_ticks());
     }
 
     /**
@@ -369,13 +375,8 @@ public:
     /**
      * The Heartbeat: Checks the queue and runs any task that is ready.
      */
-    void Tick(QTime time) {
+    void Tick() {
         static bool insideTick = false;
-
-        {
-            QManGuard guard;
-            now += time.ticks;
-        }
 
         if (insideTick || count == 0) return;
 
@@ -429,9 +430,9 @@ extern QMan qman;
 // --- Tick Dispatcher Macros ---
 
 // Base TICK with delta ticks
-#define QMAN_TICK_1(delta) qman.Tick(QTime(delta))
+#define QMAN_TICK_1(delta) do { qman.Sync(delta); qman.Tick(); } while(0)
 // Auto TICK using hardware timers
-#define QMAN_TICK_0()      qman.Tick(QTime(qman_get_delta_ticks()))
+#define QMAN_TICK_0()      do { qman.Sync(qman_get_delta_ticks()); qman.Tick(); } while(0)
 
 // Magic to select between QMAN_TICK() and QMAN_TICK(delta)
 #define QMAN_GET_TICK_MACRO(_0, _1, NAME, ...) NAME
