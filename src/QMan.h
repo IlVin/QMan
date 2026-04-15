@@ -43,7 +43,8 @@ typedef void (*WarningCallback)(uint8_t errorCode);
 enum QManError {
     QMAN_ERR_POOL_OVERFLOW = 1,
     QMAN_WARN_STATIC_LIMIT = 2,
-    QMAN_WARN_TICK_LIMIT   = 3
+    QMAN_WARN_TICK_LIMIT   = 3,
+    QMAN_WARN_DUTY_LATE    = 4
 };
 
 // Default number of tasks the manager can hold (can be changed in your sketch)
@@ -198,12 +199,15 @@ inline uint32_t qman_get_delta_ticks() {
  */
 #define QMAN_SLEEP_1()      QMAN_SLEEP_2(0_tick)
 #define QMAN_SLEEP_2(qtime) \
+    QMAN_SLEEP_RAW(qtime, __COUNTER__)
+
+#define QMAN_SLEEP_RAW(qtime, tag) \
     do { \
-        __resumeAddr = (void*)&&QMAN_JOIN(L_, __LINE__); \
+        __resumeAddr = (void*)&&QMAN_JOIN(L_, tag); \
         qman.Sync(qman_get_delta_ticks()); \
         qman.Sleep(qtime); \
         return false; \
-        QMAN_JOIN(L_, __LINE__): ; \
+        QMAN_JOIN(L_, tag): ; \
     } while (0)
 
 // Исправленный "магический" выбор для 0 или 1 аргумента
@@ -217,14 +221,17 @@ inline uint32_t qman_get_delta_ticks() {
  * accounting for the time the task itself took to execute.
  */
 #define QMAN_DUTY(qtime) \
+    QMAN_DUTY_RAW(qtime, __COUNTER__)
+
+#define QMAN_DUTY_RAW(qtime, tag) \
     do { \
-        __resumeAddr = (void*)&&QMAN_JOIN(L_, __LINE__); \
-        qman.Sync(qman_get_delta_ticks()); /* Подтягиваем время к текущему моменту */ \
+        __resumeAddr = (void*)&&QMAN_JOIN(L_, tag); \
+        qman.Sync(qman_get_delta_ticks()); \
         uint32_t elapsed = qman.Now() - qman.Started(); \
         uint32_t wait = (elapsed < qtime.ticks) ? (qtime.ticks - elapsed) : 0; \
-        qman.Sleep(QTime(wait)); \
+        qman.Duty(QTime(wait)); \
         return false; \
-        QMAN_JOIN(L_, __LINE__): ; \
+        QMAN_JOIN(L_, tag): ; \
     } while (0)
 
     // --- Smart GO Macros ---
@@ -250,6 +257,14 @@ private:
     TaskFunc currentTask;       // Pointer to the task being executed right now
     ErrorCallback onError;      // Function to call if something goes wrong
     WarningCallback onWarning;  // Function to call for system warnings
+
+#ifdef QMAN_PROF
+    // Performance Metrics (Double Buffered)
+    uint32_t lastStatsReset;    // Time of last metrics reset
+    uint16_t curLateCount, curMaxLatence;  // Accumulators for current window
+    uint16_t pubLateCount;                 // Published count for previous second
+    uint32_t pubMaxLatence;                // Published max jitter in ticks
+#endif
 
     /**
      * Internal: adds or moves a task in the queue.
@@ -293,6 +308,37 @@ private:
         count++;
     }
 
+    // Вспомогательный метод для физического перемещения задачи внутри пула
+    void move_task(int8_t oldIdx, int8_t target, uint32_t nextRun) {
+        Task temp = pool[oldIdx];
+        temp.nextRun = nextRun;
+        if (oldIdx > target) {
+            memmove(&pool[target + 1], &pool[target], sizeof(Task) * (oldIdx - target));
+        } else if (oldIdx < target) {
+            memmove(&pool[oldIdx], &pool[oldIdx + 1], sizeof(Task) * (target - oldIdx));
+        }
+        pool[target] = temp;
+    }
+
+#ifdef QMAN_PROF
+    void update_metrics(int32_t diff) {
+        if ((uint32_t)(now - lastStatsReset) >= Q_MS(1000)) {
+            // Публикуем накопленное за прошлую секунду
+            pubLateCount = curLateCount;
+            pubMaxLatence = curMaxLatence;
+            // Сбрасываем аккумуляторы
+            curLateCount = 0;
+            curMaxLatence = 0;
+            lastStatsReset = now;
+        }
+        if (diff <= 0) {
+            curLateCount++;
+            uint32_t latence = (uint32_t)(-diff);
+            if (latence > curMaxLatence) curMaxLatence = latence;
+        }
+    }
+#endif
+
     void sleep(TaskFunc f, uint32_t delay) {
         if (f == nullptr) return;
         QManGuard guard;
@@ -312,19 +358,46 @@ private:
         }
 
         if (oldIdx < target) target--;
+        move_task(oldIdx, target, nextRun);
+    }
 
-        if (oldIdx != target) {
-            Task temp = pool[oldIdx];
-            temp.nextRun = nextRun;
-            if (oldIdx > target) {
-                memmove(&pool[target + 1], &pool[target], sizeof(Task) * (oldIdx - target));
-            } else {
-                memmove(&pool[oldIdx], &pool[oldIdx + 1], sizeof(Task) * (target - oldIdx));
-            }
-            pool[target] = temp;
-        } else {
-            pool[oldIdx].nextRun = nextRun;
+    void duty(TaskFunc f, uint32_t delay) {
+        if (f == nullptr) return;
+        QManGuard guard;
+        uint32_t nextRun = now + delay;
+
+        int8_t oldIdx = -1;
+        for (uint8_t i = 0; i < count; i++) {
+            if (pool[i].func == f) { oldIdx = i; break; }
         }
+        if (oldIdx == -1) return;
+
+#ifdef QMAN_PROF
+        int32_t diff_now = (int32_t)(nextRun - now);
+        update_metrics(diff_now);
+        static bool warningSent = false;
+        if (diff_now <= 0 && onWarning && !warningSent) {
+            warningSent = true;
+            onWarning(QMAN_WARN_DUTY_LATE);
+        }
+#endif
+
+        int8_t target = count;
+        while (target > 0) {
+            int32_t diff = (int32_t)(pool[target - 1].nextRun - nextRun);
+            if (diff > 0) break; // Целевое время позже нас
+
+            // Если попали в тот же такт И мы в будущем (вежливая DUTY)
+            if (diff == 0 && (int32_t)(nextRun - now) > 0) {
+                break; // Встаем ПРАВЕЕ всех в этом слоте (в голову)
+            }
+            target--;
+        }
+
+        if (oldIdx < target) target--;
+
+        // Обычная логика перемещения в массиве
+        move_task(oldIdx, target, nextRun); 
     }
 
     void check_warnings() {
@@ -340,8 +413,13 @@ private:
     }
 
 public:
-    QMan_Generic() : now(0), lastTaskStart(0), count(0),
-                               currentTask(nullptr), onError(nullptr), onWarning(nullptr) {
+    QMan_Generic() : now(0), lastTaskStart(0), count(0), currentTask(nullptr), 
+                     onError(nullptr), onWarning(nullptr) 
+#ifdef QMAN_PROF
+                     , lastStatsReset(0), curLateCount(0), curMaxLatence(0), 
+                     pubLateCount(0), pubMaxLatence(0)
+#endif
+    {
     }
 
     void Sync(uint32_t delta) {
@@ -370,7 +448,7 @@ public:
      * Used by the system to reschedule a task after QMAN_SLEEP.
      */
     void Sleep(QTime time) { sleep(currentTask, time.ticks); }
-
+    void Duty(QTime time)  { duty(currentTask, time.ticks);  }
 
     /**
      * The Heartbeat: Checks the queue and runs any task that is ready.
@@ -420,6 +498,12 @@ public:
 
     void OnError(ErrorCallback cb)     { onError = cb; }
     void OnWarning(WarningCallback cb) { onWarning = cb; }
+
+#ifdef QMAN_PROF
+    uint16_t GetLateCount() { QManGuard g; return pubLateCount; }
+    uint32_t GetMaxLatenceMS() { QManGuard g; return Q_TICKS_TO_MS(pubMaxLatence); }
+    uint32_t GetMaxLatenceUS() { QManGuard g; return Q_TICKS_TO_US(pubMaxLatence); }
+#endif
 };
 
 // --- Global Instance and Auto-Timing ---
