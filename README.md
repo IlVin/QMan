@@ -18,7 +18,7 @@ QMAN_TASK(blinkTask) {
     QMAN_INIT { pinMode(LED_BUILTIN, OUTPUT); }
     QMAN_LOOP {
         digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-        QMAN_SLEEP_MS(500); // Wait 500ms without blocking other tasks
+        QMAN_SLEEP(500_ms); // Wait 500ms without blocking other tasks
     }
 }
 
@@ -52,8 +52,8 @@ void loop() {
 | `QMAN_TASK(name)` | Create a new task |
 | `QMAN_INIT` | Code that runs once when the task starts |
 | `QMAN_LOOP` | The main repeating part of the task |
-| `QMAN_SLEEP_MS(ms)` | Pause the task for `ms` milliseconds |
-| `QMAN_DUTY(ms)` | Run the task every `ms` milliseconds (adjusts for task time) |
+| `QMAN_SLEEP(N_ms)` | Pause the task for `ms` milliseconds |
+| `QMAN_DUTY(N_ms)` | Run the task every `ms` milliseconds (adjusts for task time) |
 | `QMAN_STOP` | Stop the task completely |
 | `QMAN_GO(task)` | Start a task right now |
 | `QMAN_GO(task, delay)` | Start a task after some delay |
