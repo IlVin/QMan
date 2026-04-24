@@ -2,6 +2,10 @@
 
 All notable changes to the **QMan** library will be documented in this file.
 
+## [1.0.6-beta] - 2026-04-24
+### Added
+- llms.txt
+
 ## [1.0.5-beta] - 2026-04-24
 ### Fixed
 - Fixed rare but annoying bug where `QMAN_DUTY` could schedule a task in the past under heavy load, causing instant re-execution.

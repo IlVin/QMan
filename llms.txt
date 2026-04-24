@@ -1,0 +1,168 @@
+# QMan Library - LLM Index
+
+## Overview
+QMan (Queue Manager) is a very small and simple tool for Arduino. It helps you run many tasks at the same time without waiting for each other. It is perfect for small computers like Arduino Uno, Nano, Mega, STM32, ESP8266, and ESP32.
+
+**Version:** 1.0.5-beta
+**License:** MIT
+**Platforms:** AVR (Uno, Nano, Mega), STM32, ESP8266, ESP32, LGT8F
+
+## Core Macros Quick Reference
+
+| Macro | What it does |
+|-------|---------------|
+| 'QMAN_TASK(name)' | Create a new task |
+| 'QMAN_INIT' | Code that runs once when the task starts |
+| 'QMAN_LOOP' | The main repeating part of the task |
+| 'QMAN_SLEEP_MS(ms)' | Pause the task for 'ms' milliseconds (non-blocking) |
+| 'QMAN_SLEEP_US(us)' | Pause the task for 'us' microseconds |
+| 'QMAN_DUTY(ms)' | Run the task every 'ms' milliseconds (auto-compensates for task time) |
+| 'QMAN_STOP' | Stop the task completely |
+| 'QMAN_GO(task)' | Start a task right now |
+| 'QMAN_GO(task, delay)' | Start a task after some delay |
+| 'QMAN_TICK()' | Call this in 'loop()' to drive the manager |
+
+## Quick Start Example
+
+```
+cpp
+#include <QMan.h>
+
+QMAN_TASK(blink) {
+    QMAN_INIT { pinMode(LED_BUILTIN, OUTPUT); }
+    QMAN_LOOP {
+        digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+        QMAN_SLEEP_MS(500);
+    }
+}
+
+void setup() { QMAN_GO(blink); }
+void loop() { QMAN_TICK(); }
+```
+
+## Configuration
+
+Change the maximum number of tasks (default is 16):
+
+```
+cpp
+#define QMAN_POOL_SIZE 32
+#include <QMan.h>
+```
+
+Change timing accuracy (default is 32 microseconds, smaller = more accurate):
+
+```
+cpp
+#define QMAN_TICK_MAX_US 16
+#include <QMan.h>
+```
+
+## Error Handling
+
+```
+cpp
+void onWarning(uint8_t code) {
+    Serial.print("Warning: ");
+    Serial.println(code);
+}
+
+void onError(uint8_t code) {
+    Serial.print("Error: ");
+    Serial.println(code);
+}
+
+void setup() {
+    qman.OnWarning(onWarning);
+    qman.OnError(onError);
+}
+```
+
+### Error Codes
+
+| Code | Name | Meaning |
+|------|------|---------|
+| 1 | 'QMAN_ERR_POOL_OVERFLOW' | Too many tasks running at once |
+| 2 | 'QMAN_WARN_STATIC_LIMIT' | You created more tasks than the pool can hold |
+| 3 | 'QMAN_WARN_TICK_LIMIT' | Requested tick accuracy is not possible |
+| 4 | 'QMAN_WARN_DUTY_LATE' | Task took too long to finish |
+
+## SLEEP vs DUTY (Important!)
+
+**SLEEP** (relative timing):
+- Waits for fixed time AFTER your task finishes
+- Total time = work time + sleep time
+- DRIFTS over time
+
+**DUTY** (absolute timing):
+- Keeps exact period regardless of work time
+- Automatically waits less if your task took longer
+- NO DRIFT
+
+Example:
+
+```
+cpp
+QMAN_TASK(slowTask) {
+    QMAN_LOOP {
+        doWork();              // Takes 100ms
+        QMAN_SLEEP(1000_ms);   // Total = 1100ms (drifts!)
+    }
+}
+
+QMAN_TASK(preciseTask) {
+    QMAN_LOOP {
+        doWork();              // Takes 100ms
+        QMAN_DUTY(1000_ms);    // Total = 1000ms (exact!)
+    }
+}
+```
+
+## How QMan Compares
+
+| Feature | QMan | AceRoutine | GyverOS | FreeRTOS |
+|---------|------|------------|---------|----------|
+| Easy to learn | Yes | Medium | Medium | Hard |
+| RAM per task | Very low (<8 bytes) | Medium | Low | High |
+| Saves task state | Yes | Yes | No | Yes |
+| Auto time adjustment (DUTY) | Yes | No | No | Yes |
+| Safety features | Yes | No | No | Yes |
+| Works on 8-bit Arduino | Yes | Yes | Yes | No |
+
+## Example Sketches
+
+The library comes with these examples:
+
+| Example | What it shows |
+|---------|----------------|
+| 'AsyncLCD.ino' | Print to LCD without blocking the LED blink |
+| 'SleepVsDuty.ino' | Difference between SLEEP and DUTY |
+| 'TestStability.ino' | Check timing accuracy |
+
+Look in the 'examples/' folder to try them.
+
+## Internal Concepts (for advanced users)
+
+- **Zero-stack coroutines:** Tasks use a static pointer to remember where they paused
+- **Priority queue:** Tasks are sorted by their next run time (most urgent at the end)
+- **Interrupt safety:** 'QManGuard' disables interrupts during queue changes
+- **Time rollover safe:** Uses 32-bit math that works even when timers wrap around
+
+## Related Files
+
+| File | Purpose |
+|------|---------|
+| 'QMan.h' | Main header with macros and class definition |
+| 'QMan.cpp' | Global instance and task counter |
+| 'library.properties' | Arduino IDE metadata |
+| 'README.md' | Full user documentation |
+| 'CHANGELOG.md' | Version history |
+
+## Links
+
+- Repository: https://github.com/IlVin/QMan
+- Author: Ilia Vinokurov
+- License: MIT (free to use)
+
+---
+*Created for the Arduino community*
