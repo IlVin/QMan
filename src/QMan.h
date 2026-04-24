@@ -166,7 +166,7 @@ inline uint32_t qman_get_delta_ticks() {
  * Use it like: QMAN_TASK(myBlinkTask) { ... }
  */
 #define QMAN_TASK(name) \
-    static QManCounter QMAN_JOIN(cnt_, name); \
+    static QManCounter QMAN_JOIN(qmc_, __COUNTER__); \
     bool name()
 
 /**

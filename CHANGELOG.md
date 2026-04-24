@@ -2,6 +2,20 @@
 
 All notable changes to the **QMan** library will be documented in this file.
 
+## [1.0.5-beta] - 2026-04-24
+### Fixed
+- Fixed rare but annoying bug where `QMAN_DUTY` could schedule a task in the past under heavy load, causing instant re-execution.
+- Fixed memory corruption issue when `QMAN_POOL_SIZE` was changed after including the library (ODR violation). Now the size is locked at compile time.
+- Fixed race condition in `qman_get_delta_ticks()` for AVR that could cause incorrect timing after 70 minutes of operation.
+
+### Changed
+- Improved stability of the internal queue when many tasks are added and removed at the same time.
+- Enhanced error recovery: if a task returns `true` (STOP), it is now removed immediately and cannot be accidentally rescheduled in the same tick.
+
+### Added
+- Better compiler warnings for users who forget to call `QMAN_TICK()` in `loop()`.
+- Example sketches now include comments for absolute beginners.
+
 ## [1.0.3-beta] - 2026-04-10
 ### Added
 - ```Nitro Memory Engine```: Implemented high-performance task insertion and removal using ```memmove``` instead of iterative swaps.

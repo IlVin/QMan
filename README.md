@@ -1,158 +1,141 @@
 # QMan
-QMan (Queue Manager) — Ultra-lightweight cooperative task queue manager for Arduino. Features async-style DSL macros, zero-stack coroutines, and LIFO/FIFO priority management. Includes static safety checks, overflow protection via WDT/Error callbacks, and deterministic tick-based timing.
 
-# Quick glimpse🚀
+**QMan (Queue Manager)** is a very small and simple tool for Arduino. It helps you run many tasks at the same time without waiting for each other. It is perfect for small computers like Arduino Uno, Nano, Mega, STM32, ESP8266, and ESP32.
 
-```cpp
-// Quick glimpse
-QMAN_TASK(myTask) {
-    QMAN_INIT { /* Setup */ }
-    QMAN_LOOP {
-        doSomething();
-        QMAN_SLEEP_MS(500); 
-    }
-}
+## Project Status
+
+- **Version:** 1.0.4-beta
+- **License:** MIT (free to use)
+- **Works on:** AVR (Uno, Nano, Mega), STM32, ESP8266, ESP32, LGT8F
+
+## Quick Example
+
 ```
-
-**QMan** is an ultra-lightweight, high-performance cooperative task queue manager for Arduino and AVR-based microcontrollers. It allows you to write non-blocking, asynchronous-style code using simple DSL macros without the overhead of a full RTOS.
-
-> **Status:** v1.0.0-beta  
-> **License:** MIT
-
-## Why QMan?
-Unlike simple timers, QMan is a disciplined **Queue Manager**. It doesn't just run functions; it manages their lifecycle, execution order, and system safety.
-
-- **Async-style Syntax:** Write complex logic with `QMAN_SLEEP` and `QMAN_LOOP` that looks like `async/await`.
-- **Zero-Stack Coroutines:** Tasks don't need dedicated stack space, saving precious RAM.
-- **Smart Queue:** Optimized LIFO/FIFO priority management.
-- **Static Safety:** Built-in counter warns you if the number of tasks in code exceeds the pool size.
-- **Deterministic:** Time is injected from outside, making it perfect for unit testing and stress testing.
-
-## Installation
-1. Download this repository as a `.zip` file.
-2. In Arduino IDE, go to **Sketch -> Include Library -> Add .ZIP Library**.
-
-## Quick Start
-
-```cpp
+cpp
 #include <QMan.h>
 
-// 1. Define a task using DSL macros
 QMAN_TASK(blinkTask) {
-    QMAN_INIT {
-        pinMode(LED_BUILTIN, OUTPUT);
-    }
-    
+    QMAN_INIT { pinMode(LED_BUILTIN, OUTPUT); }
     QMAN_LOOP {
         digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-        QMAN_SLEEP_MS(500); // Non-blocking sleep
+        QMAN_SLEEP_MS(500); // Wait 500ms without blocking other tasks
     }
 }
 
 void setup() {
-    // 2. Start the task immediately
-    QMAN_GO(blinkTask, 0);
+    QMAN_GO(blinkTask);
 }
 
 void loop() {
-    // 3. Drive the manager with system ticks (32us per tick)
-    QMAN_TICK(); 
+    QMAN_TICK(); // Run the manager
 }
 ```
 
-## Safety Features
-QMan is built for reliability in embedded systems:
-* **OnError Callback:** Triggered on dynamic pool overflow before a hard Watchdog reset.
-* **OnWarning Callback:** Triggered if your code defines more tasks than the allocated memory pool.
-* **Recursion Protection:** Prevents stack crashes if a task recursively calls the dispatcher.
+## Why QMan is Great
 
-## Error Codes
+- **Easy to use** — write code that looks like normal steps, but it does not block
+- **Saves memory** — tasks do not need their own stack space
+- **Smart queue** — automatically decides which task to run next
+- **Safe** — warns you if you create too many tasks
+- **Fixed timing** — you can make tasks run at exact times, even if they take different amounts of time to finish
 
-| Code | Enum | Description |
-| :--- | :--- | :--- |
-| 1 | QMAN_ERR_POOL_OVERFLOW | Dynamic queue is full. System will reboot. |
-| 2 | QMAN_WARN_STATIC_LIMIT | Total defined tasks exceed pool size. Check your memory! |
+## How to Install
 
-## Comparison with other Schedulers
+1. Download this library as a `.zip` file
+2. In Arduino IDE, go to **Sketch → Include Library → Add .ZIP Library**
+3. Or search for "QMan" in the Library Manager
 
+## Main Commands (Macros)
 
-| Feature | QMan | AceRoutine | GyverOS | TaskScheduler | Protothreads | FreeRTOS |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Programming Style** | **DSL (Async-like)** | C++ Classes | Polling | Callbacks | Macros/Switch | Task Functions |
-| **RAM Usage** | **Extremely Low** | Medium | Low | Medium | Low | Very High |
-| **Context Saving** | **Yes (Zero-stack)** | Yes | No | No | Yes | Yes (Full stack) |
-| **Safety Guards** | **WDT / OnError** | None | None | None | None | HardFault |
-| **Time Rollover** | **Immune (38h)** | millis() based | millis() | millis() drift | Manual check | Tick-based |
+| Macro | What it does |
+|-------|---------------|
+| `QMAN_TASK(name)` | Create a new task |
+| `QMAN_INIT` | Code that runs once when the task starts |
+| `QMAN_LOOP` | The main repeating part of the task |
+| `QMAN_SLEEP_MS(ms)` | Pause the task for `ms` milliseconds |
+| `QMAN_DUTY(ms)` | Run the task every `ms` milliseconds (adjusts for task time) |
+| `QMAN_STOP` | Stop the task completely |
+| `QMAN_GO(task)` | Start a task right now |
+| `QMAN_GO(task, delay)` | Start a task after some delay |
+| `QMAN_TICK()` | Call this in `loop()` to drive the manager |
 
----
+## Change the Task Limit
 
-## Code Style Examples (Blink Task)
+By default, you can have up to 16 tasks. Change it before including the library:
 
-### 1. QMan (Efficient & Linear)
-Linear code, no global flags needed. Best for 8-bit MCUs.
-```cpp
-QMAN_TASK(blink) {
-  QMAN_INIT { pinMode(13, OUTPUT); }
-  QMAN_LOOP {
-    digitalWrite(13, !digitalRead(13));
-    QMAN_SLEEP_MS(500);
-  }
+```
+cpp
+#define QMAN_POOL_SIZE 32
+#include <QMan.h>
+```
+
+## Change Timing Accuracy
+
+Default tick is 32 microseconds. Smaller = more accurate but more CPU work:
+
+```
+cpp
+#define QMAN_TICK_MAX_US 16
+#include <QMan.h>
+```
+
+## Error Handling
+
+```
+cpp
+void onWarning(uint8_t code) {
+    Serial.print("Warning: ");
+    Serial.println(code);
+}
+
+void onError(uint8_t code) {
+    Serial.print("Error: ");
+    Serial.println(code);
+}
+
+void setup() {
+    qman.OnWarning(onWarning);
+    qman.OnError(onError);
+    QMAN_GO(myTask);
 }
 ```
 
-### 2. AceRoutine (Modern OO)
-Uses C++ classes. Good, but higher RAM overhead due to object-oriented design.
-```cpp
-COROUTINE(blink) {
-  COROUTINE_LOOP() {
-    digitalWrite(13, !digitalRead(13));
-    COROUTINE_DELAY(500);
-  }
-}
-```
+### Error Codes
 
-### 3. GyverOS (Polling Style)
-Lightweight but requires manual state management (global flags) for complex logic.
-```cpp
-void task() {
-  static bool state;
-  digitalWrite(13, state = !state);
-}
-// Logic: OS.attach(0, task, 500);
-```
+| Code | Name | Meaning |
+|------|------|---------|
+| 1 | `QMAN_ERR_POOL_OVERFLOW` | Too many tasks running at once |
+| 2 | `QMAN_WARN_STATIC_LIMIT` | You created more tasks than the pool can hold |
+| 3 | `QMAN_WARN_TICK_LIMIT` | Requested tick accuracy is not possible |
+| 4 | `QMAN_WARN_DUTY_LATE` | Task took too long to finish |
 
-### 4. TaskScheduler (The Popular)
-No context saving. Tasks must be broken down into many separate callback functions.
-```cpp
-void blinkCb() { digitalWrite(13, !digitalRead(13)); }
-Task t1(500, TASK_FOREVER, &blinkCb);
-```
+## How QMan Compares to Others
 
-### 5. Protothreads (The Ancestor)
-Low-level macros. Lacks a built-in scheduler; you must run each thread manually in loop().
-```cpp
-PT_THREAD(blink(struct pt *p)) {
-  PT_BEGIN(p);
-  while(1) {
-    digitalWrite(13, !digitalRead(13));
-    PT_WAIT_UNTIL(p, millis() - last > 500);
-    last = millis();
-  }
-  PT_END(p);
-}
-```
+| Feature | QMan | AceRoutine | GyverOS | TaskScheduler | FreeRTOS |
+|---------|------|------------|---------|---------------|----------|
+| Easy to learn | Yes | Medium | Medium | Hard | Hard |
+| RAM per task | **Very low (<8 bytes)** | Medium | Low | Medium | High |
+| Saves task state | Yes | Yes | No | No | Yes |
+| Auto time adjustment (DUTY) | **Yes** | No | No | No | Yes |
+| Safety features | Yes | No | No | No | Yes |
+| Works on 8-bit Arduino | **Yes** | Yes | Yes | Yes | No |
 
-### 6. FreeRTOS (The Professional)
-Preemptive multitasking. Powerful, but consumes ~150 bytes of RAM per task.
-```cpp
-void vBlink(void *pv) {
-  for(;;) {
-    digitalWrite(13, !digitalRead(13));
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-  }
-}
-```
+## Examples
 
+The library comes with these examples:
 
----
-Created by developers for the Arduino community.
+| Example | What it shows |
+|---------|----------------|
+| `AsyncLCD.ino` | Print to LCD without blocking the LED blink |
+| `SleepVsDuty.ino` | Difference between SLEEP and DUTY |
+| `TestStability.ino` | Check timing accuracy |
+
+Look in the `examples/` folder to try them.
+
+## License
+
+MIT License — you can use it for free, even in commercial projects.
+
+## Author
+
+Created by Ilia Vinokurov for the Arduino community. Questions? Open an Issue on GitHub: https://github.com/IlVin/QMan
