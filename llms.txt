@@ -1,66 +1,78 @@
 # QMan Library - LLM Index
 
 ## Overview
-QMan (Queue Manager) is a very small and simple tool for Arduino. It helps you run many tasks at the same time without waiting for each other. It is perfect for small computers like Arduino Uno, Nano, Mega, STM32, ESP8266, and ESP32.
+QMan (Queue Manager) is an ultra-lightweight cooperative task queue manager for Arduino and AVR-based microcontrollers. It allows writing non-blocking, asynchronous-style code using simple DSL macros without the overhead of a full RTOS.
 
-**Version:** 1.0.5-beta
+**Version:** 1.0.2-beta (from QMan.h)
 **License:** MIT
-**Platforms:** AVR (Uno, Nano, Mega), STM32, ESP8266, ESP32, LGT8F
+**Platforms:** AVR, STM32, ESP8266, ESP32 (any Arduino-compatible)
 
-## Core Macros Quick Reference
+## Core Macros (from QMan.h)
 
 | Macro | What it does |
 |-------|---------------|
-| 'QMAN_TASK(name)' | Create a new task |
-| 'QMAN_INIT' | Code that runs once when the task starts |
-| 'QMAN_LOOP' | The main repeating part of the task |
-| 'QMAN_SLEEP_MS(ms)' | Pause the task for 'ms' milliseconds (non-blocking) |
-| 'QMAN_SLEEP_US(us)' | Pause the task for 'us' microseconds |
-| 'QMAN_DUTY(ms)' | Run the task every 'ms' milliseconds (auto-compensates for task time) |
-| 'QMAN_STOP' | Stop the task completely |
-| 'QMAN_GO(task)' | Start a task right now |
-| 'QMAN_GO(task, delay)' | Start a task after some delay |
-| 'QMAN_TICK()' | Call this in 'loop()' to drive the manager |
+| `QMAN_TASK(name)` | Define a new task function |
+| `QMAN_INIT` | Code that runs once when task starts |
+| `QMAN_LOOP` | Infinite loop that repeats the task |
+| `QMAN_SLEEP(duration)` | Pause task (duration uses _ms, _us, or _tick literals) |
+| `QMAN_DUTY(duration)` | Fixed-frequency execution (auto-compensates for task time) |
+| `QMAN_STOP` | Stop and remove task from queue |
+| `QMAN_GO(task)` | Start task immediately |
+| `QMAN_GO(task, delay)` | Start task after delay |
+| `QMAN_TICK()` | Call in loop() to drive scheduler |
+| `QMAN_TICK(delta)` | Manual tick with delta time |
+
+## Time Literals (from QMan.h)
+
+'''
+cpp
+QMAN_SLEEP(1000_ms);   // 1000 milliseconds
+QMAN_SLEEP(500_us);    // 500 microseconds
+QMAN_SLEEP(10_tick);   // 10 internal ticks
+QMAN_DUTY(1000_ms);    // Run every 1 second exactly
+'''
 
 ## Quick Start Example
 
-```
+'''
 cpp
 #include <QMan.h>
 
 QMAN_TASK(blink) {
     QMAN_INIT { pinMode(LED_BUILTIN, OUTPUT); }
     QMAN_LOOP {
-        digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-        QMAN_SLEEP_MS(500);
+        digitalWrite(LED_BUILTIN, HIGH);
+        QMAN_SLEEP(500_ms);
+        digitalWrite(LED_BUILTIN, LOW);
+        QMAN_SLEEP(500_ms);
     }
 }
 
 void setup() { QMAN_GO(blink); }
 void loop() { QMAN_TICK(); }
-```
+'''
 
 ## Configuration
 
-Change the maximum number of tasks (default is 16):
+Change maximum number of tasks (default 16) BEFORE including QMan.h:
 
-```
+'''
 cpp
 #define QMAN_POOL_SIZE 32
 #include <QMan.h>
-```
+'''
 
-Change timing accuracy (default is 32 microseconds, smaller = more accurate):
+Change tick accuracy (default 32 microseconds):
 
-```
+'''
 cpp
-#define QMAN_TICK_MAX_US 16
+#define QMAN_TICK_MAX_US 16  // Smaller = more accurate, more CPU
 #include <QMan.h>
-```
+'''
 
 ## Error Handling
 
-```
+'''
 cpp
 void onWarning(uint8_t code) {
     Serial.print("Warning: ");
@@ -76,93 +88,95 @@ void setup() {
     qman.OnWarning(onWarning);
     qman.OnError(onError);
 }
-```
+'''
 
-### Error Codes
+### Error Codes (enum QManError)
 
 | Code | Name | Meaning |
 |------|------|---------|
-| 1 | 'QMAN_ERR_POOL_OVERFLOW' | Too many tasks running at once |
-| 2 | 'QMAN_WARN_STATIC_LIMIT' | You created more tasks than the pool can hold |
-| 3 | 'QMAN_WARN_TICK_LIMIT' | Requested tick accuracy is not possible |
-| 4 | 'QMAN_WARN_DUTY_LATE' | Task took too long to finish |
+| 1 | `QMAN_ERR_POOL_OVERFLOW` | Dynamic queue full. System may reboot. |
+| 2 | `QMAN_WARN_STATIC_LIMIT` | More tasks defined than POOL_SIZE |
+| 3 | `QMAN_WARN_TICK_LIMIT` | Requested tick accuracy not possible |
+| 4 | `QMAN_WARN_DUTY_LATE` | Task execution exceeded duty period |
 
-## SLEEP vs DUTY (Important!)
+## SLEEP vs DUTY
 
 **SLEEP** (relative timing):
-- Waits for fixed time AFTER your task finishes
-- Total time = work time + sleep time
+- Waits fixed duration AFTER task work completes
+- Total period = work_time + sleep_time
 - DRIFTS over time
 
 **DUTY** (absolute timing):
-- Keeps exact period regardless of work time
-- Automatically waits less if your task took longer
+- Maintains exact period regardless of work time
+- Automatically reduces wait time if task took longer
 - NO DRIFT
 
-Example:
+Example from QMan.h comments:
 
-```
+'''
 cpp
 QMAN_TASK(slowTask) {
     QMAN_LOOP {
         doWork();              // Takes 100ms
-        QMAN_SLEEP(1000_ms);   // Total = 1100ms (drifts!)
+        QMAN_SLEEP(1000_ms);   // Total = 1100ms (drifts)
     }
 }
 
 QMAN_TASK(preciseTask) {
     QMAN_LOOP {
         doWork();              // Takes 100ms
-        QMAN_DUTY(1000_ms);    // Total = 1000ms (exact!)
+        QMAN_DUTY(1000_ms);    // Total = 1000ms (exact)
     }
 }
-```
+'''
 
-## How QMan Compares
+## Internal Functions (from QMan.h)
 
-| Feature | QMan | AceRoutine | GyverOS | FreeRTOS |
-|---------|------|------------|---------|----------|
-| Easy to learn | Yes | Medium | Medium | Hard |
-| RAM per task | Very low (<8 bytes) | Medium | Low | High |
-| Saves task state | Yes | Yes | No | Yes |
-| Auto time adjustment (DUTY) | Yes | No | No | Yes |
-| Safety features | Yes | No | No | Yes |
-| Works on 8-bit Arduino | Yes | Yes | Yes | No |
+| Function | Purpose |
+|----------|---------|
+| `qman.Setup()` | Sync internal clock with hardware (call in setup) |
+| `qman.Now()` | Get current internal time in ticks |
+| `qman.Started()` | Get when current task started |
+| `qman.Len()` | Get number of tasks in queue |
+| `qman.Clear()` | Remove all tasks and reset time |
+| `qman.Sync(delta)` | Manually add delta ticks |
 
-## Example Sketches
+## Internal Types (from QMan.h)
 
-The library comes with these examples:
+'''
+cpp
+struct QTime {
+    uint32_t ticks;  // Internal representation
+};
 
-| Example | What it shows |
-|---------|----------------|
-| 'AsyncLCD.ino' | Print to LCD without blocking the LED blink |
-| 'SleepVsDuty.ino' | Difference between SLEEP and DUTY |
-| 'TestStability.ino' | Check timing accuracy |
+struct Task {
+    TaskFunc func;    // Function pointer to task
+    uint32_t nextRun; // When to run (in ticks)
+};
+'''
 
-Look in the 'examples/' folder to try them.
+## Key Internal Concepts
 
-## Internal Concepts (for advanced users)
+- **Zero-stack coroutines:** Uses `static void* __resumeAddr` and goto for state saving
+- **Priority queue:** Tasks sorted by `nextRun` (most urgent at pool[count-1])
+- **Interrupt safety:** `QManGuard` RAII class disables interrupts during queue operations
+- **Time rollover safe:** Uses 32-bit unsigned arithmetic with signed difference comparison
 
-- **Zero-stack coroutines:** Tasks use a static pointer to remember where they paused
-- **Priority queue:** Tasks are sorted by their next run time (most urgent at the end)
-- **Interrupt safety:** 'QManGuard' disables interrupts during queue changes
-- **Time rollover safe:** Uses 32-bit math that works even when timers wrap around
-
-## Related Files
+## Related Files in Repository
 
 | File | Purpose |
 |------|---------|
-| 'QMan.h' | Main header with macros and class definition |
-| 'QMan.cpp' | Global instance and task counter |
-| 'library.properties' | Arduino IDE metadata |
-| 'README.md' | Full user documentation |
-| 'CHANGELOG.md' | Version history |
+| `src/QMan.h` | Main header (macros, class definition, literals) |
+| `src/QMan.cpp` | Global instance `qman` and task counter |
+| `examples/AsyncLCD.ino` | Non-blocking LCD output demo |
+| `examples/SleepVsDuty.ino` | SLEEP vs DUTY comparison |
+| `examples/TestStability.ino` | Timing accuracy test |
+| `library.properties` | Arduino IDE metadata |
+| `README.md` | Full documentation |
+| `CHANGELOG.md` | Version history |
 
 ## Links
 
 - Repository: https://github.com/IlVin/QMan
 - Author: Ilia Vinokurov
-- License: MIT (free to use)
-
----
-*Created for the Arduino community*
+- License: MIT
