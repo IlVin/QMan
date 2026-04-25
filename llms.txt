@@ -1,182 +1,231 @@
-# QMan Library - LLM Index
+Repository: github.com/IlVin/QMan
+Version: 1.0.7-beta
+Author: Ilia Vinokurov
+License: MIT
 
-## Overview
-QMan (Queue Manager) is an ultra-lightweight cooperative task queue manager for Arduino and AVR-based microcontrollers. It allows writing non-blocking, asynchronous-style code using simple DSL macros without the overhead of a full RTOS.
+=== WHAT IS QMAN ===
+QMan is an ultra-lightweight cooperative task queue manager for Arduino. It is not an OS, not protothreads, not a classic round-robin scheduler. It is a tick-based priority queue that executes tasks in discrete time slots with automatic dynamic reprioritization of late tasks.
 
-**Version:** 1.0.2-beta (from QMan.h)
-**License:** MIT
-**Platforms:** AVR, STM32, ESP8266, ESP32 (any Arduino-compatible)
+=== CORE ARCHITECTURAL PRINCIPLE ===
+QMan does NOT use hardware timer interrupts for scheduling. The system tick is advanced ONLY by calling QMAN_TICK() manually in loop() or manually via QMAN_TICK(N_tick) for testing. The granularity of a tick defaults to 32 microseconds because:
+1. An empty loop() on typical AVR takes approximately 32 microseconds, so finer granularity is physically meaningless when tick is advanced from loop().
+2. 32 microseconds is convenient for bit-shift arithmetic on AVR, STM32, and ESP platforms.
+3. The 'now' counter bit width was chosen so that a SLEEP of up to one hour is safe from overflow artifacts.
+4. Granularity reduces the required bit width of internal time variables compared to using raw microseconds.
 
-## Core Macros (from QMan.h)
+=== HOW THE TICK SYSTEM WORKS ===
+QMan time is measured in internal "ticks". The conversion chain is:
+  Raw hardware ticks (e.g. 4us on 16MHz AVR from Timer0, or DWT cycle counter on STM32)
+       |
+       v
+  System ticks = group of raw ticks, sized to be <= QMAN_TICK_MAX_US (default 32us)
+       |
+       v
+  User time: 500_ms, 100_us, etc. converted to system ticks at compile time via constexpr
 
-| Macro | What it does |
-|-------|---------------|
-| `QMAN_TASK(name)` | Define a new task function |
-| `QMAN_INIT` | Code that runs once when task starts |
-| `QMAN_LOOP` | Infinite loop that repeats the task |
-| `QMAN_SLEEP(duration)` | Pause task (duration uses _ms, _us, or _tick literals) |
-| `QMAN_DUTY(duration)` | Fixed-frequency execution (auto-compensates for task time) |
-| `QMAN_STOP` | Stop and remove task from queue |
-| `QMAN_GO(task)` | Start task immediately |
-| `QMAN_GO(task, delay)` | Start task after delay |
-| `QMAN_TICK()` | Call in loop() to drive scheduler |
-| `QMAN_TICK(delta)` | Manual tick with delta time |
+Key formulas for AVR (16MHz):
+  QMAN_RAW_US = 64000000UL / F_CPU = 4us per raw tick
+  QMAN_TICK_SHIFT = selects how many raw ticks per system tick to stay under QMAN_TICK_MAX_US
+  For default 32us max: shift = 3, so 1 system tick = 8 raw ticks = 32us
+  Q_US(us) = us / 32
+  Q_MS(ms) = Q_US(ms * 1000)
 
-## Time Literals (from QMan.h)
+The user NEVER works with raw ticks. All time is expressed through type-safe QTime objects created by literals:
+  _ms for milliseconds
+  _us for microseconds
+  _tick for raw system ticks (rarely used)
 
-'''
-cpp
-QMAN_SLEEP(1000_ms);   // 1000 milliseconds
-QMAN_SLEEP(500_us);    // 500 microseconds
-QMAN_SLEEP(10_tick);   // 10 internal ticks
-QMAN_DUTY(1000_ms);    // Run every 1 second exactly
-'''
+=== TIME PROGRESSION ===
+qman_get_delta_ticks() reads elapsed raw hardware ticks since last call, then divides by tick size to get delta in system ticks. On AVR this reads Timer0 overflow count and TCNT0 atomically using QManGuard (RAII interrupt lock). On STM32 it reads DWT->CYCCNT. The delta is added to qman.now via Sync().
 
-## Quick Start Example
+=== TWO FORMS OF QMAN_TICK ===
+QMAN_TICK()      — auto: reads hardware delta via qman_get_delta_ticks(), adds to 'now', runs Tick()
+QMAN_TICK(N_tick) — manual: adds exactly N ticks to 'now' via Sync(), runs Tick()
 
-'''
-cpp
-#include <QMan.h>
+The manual form is the testing entry point. It bypasses hardware entirely, giving the test harness complete control over time progression.
 
-QMAN_TASK(blink) {
-    QMAN_INIT { pinMode(LED_BUILTIN, OUTPUT); }
-    QMAN_LOOP {
-        digitalWrite(LED_BUILTIN, HIGH);
-        QMAN_SLEEP(500_ms);
-        digitalWrite(LED_BUILTIN, LOW);
-        QMAN_SLEEP(500_ms);
+=== THE "SLOT" MODEL OF SCHEDULING ===
+QMan thinks of time as discrete SLOTS, not a continuous timeline. Each slot equals one system tick. Tasks are scheduled INTO specific future slots. When QMAN_TICK() is called, it computes which slot 'now' has reached. ALL tasks whose nextRun slot is <= now are eligible to run. They execute sequentially, one per Tick() call.
+
+=== HOW SLEEP AND DUTY FILL SLOTS ===
+QMAN_SLEEP(time):
+  nextRun = now + time_to_ticks(time)
+  Task is placed in the future slot exactly 'time' ticks from now.
+  If the task was late in starting, it loses that time — the sleep is from NOW, not from when it SHOULD have run.
+
+QMAN_DUTY(period):
+  elapsed = now - taskStartTime
+  wait = (elapsed < period_ticks) ? (period_ticks - elapsed) : 0
+  Task is placed in slot exactly 'period_ticks' from its LAST START, not from now.
+  This compensates for the time the task spent executing, preserving a fixed period.
+  If elapsed >= period_ticks (task overran), wait = 0 and task goes to the immediate slot.
+
+=== INTERNAL QUEUE STRUCTURE ===
+The task queue is a flat array pool[POOL_SIZE] of Task structs, sorted by nextRun DESCENDING. The most urgent task (smallest nextRun) is at pool[count-1]. This is intentional: Tick() checks only the LAST element, making the "who is next" check O(1).
+
+Each Task contains:
+  TaskFunc func;      // pointer to task function
+  uint32_t nextRun;   // slot number when this task should run
+
+=== QUEUE INSERTION ALGORITHM (DYNAMIC PRIORITIZATION) ===
+When a task is added or rescheduled (via go(), sleep(), duty()), the insertion algorithm finds its position in the sorted array:
+
+For SLEEP (via sleep()):
+  Tasks that are LATE (their new nextRun is <= now) have a nextRun SMALLER than tasks waiting in future slots. They get inserted further RIGHT, closer to the urgent end. This is DYNAMIC REPRIORITIZATION: late tasks automatically get higher priority in subsequent scheduling cycles.
+
+For DUTY (via duty()):
+  Similar logic but with an additional nuance: if nextRun equals another task's nextRun AND the task is in the future, it gets placed to the RIGHT of all tasks in the same slot. This prevents duty-bound tasks from starving each other when their slots align.
+
+=== HOW TICK() EXECUTES TASKS ===
+QMAN_TICK() does:
+  1. Sync time: add delta hardware ticks to 'now' (or use manual delta)
+  2. Check the URGENT end: if pool[count-1].nextRun <= now, pop that task
+  3. Set currentTask and lastTaskStart = now
+  4. Execute currentTask() ONCE
+  5. Task function is void. It automatically disappears when function ends.
+  6. To reschedule, call QMAN_SLEEP or QMAN_DUTY (they do NOT exit permanently)
+
+Only ONE task runs per Tick() call. This ensures cooperative behavior: no task can monopolize the CPU.
+
+=== COROUTINE MECHANISM: COMPUTED GOTO ===
+QMan uses GCC's "labels as values" extension (computed goto). This is the same technique used by AceRoutine and Protothreads.
+
+QMAN_INIT: declares a static void* resumeAddr. If it's non-null, executes 'goto *resumeAddr' to jump to the saved label within the LOOP body. This is how a task "resumes" after a SLEEP.
+
+QMAN_LOOP: defines a label loop_entry for the top of the loop. Resets resumeAddr to null so next entry from QMAN_INIT falls through normally.
+
+QMAN_SLEEP and QMAN_DUTY: compute the resume label address using &&labelName GCC extension, save it to resumeAddr, call qman.Sleep()/Duty() to reschedule, then return. When the task is next executed, QMAN_INIT jumps to that label, continuing right after the SLEEP call.
+
+This gives the illusion of linear, blocking code without needing per-task stacks.
+
+=== MINIMAL QMAN CODE ===
+
+QMan tasks are void functions. The simplest task does NOT require QMAN_INIT or QMAN_LOOP:
+
+  QMAN_TASK(myTask) {
+      digitalWrite(LED_BUILTIN, HIGH);
+      QMAN_GO(otherTask, 1000_ms);
+  }
+
+This works because:
+  1. QMAN_TASK creates a void function named 'myTask'
+  2. The function executes once and automatically removes itself from the queue
+  3. QMAN_GO schedules 'otherTask' to run after 1000 ms
+
+You can build Finite State Machines by having tasks start each other:
+
+  QMAN_TASK(taskOn) {
+      digitalWrite(LED_BUILTIN, HIGH);
+      QMAN_GO(taskOff, 1000_ms);
+  }
+
+  QMAN_TASK(taskOff) {
+      digitalWrite(LED_BUILTIN, LOW);
+      QMAN_GO(taskOn, 1000_ms);
+  }
+
+  void loop() { QMAN_TICK(); QMAN_GO(taskOn); }
+
+RULES:
+  - QMAN_INIT is only needed if you have static variables to initialize
+  - QMAN_LOOP is only needed if you want the task to repeat without being restarted externally
+  - QMAN_SLEEP and QMAN_DUTY require QMAN_INIT and QMAN_LOOP (they need __resumeAddr and __loop_entry)
+
+=== MEMORY OVERHEAD ===
+Per task RAM: a single void* for __resumeAddr (2 bytes on AVR, 4 on 32-bit). The Task struct in the pool uses 6 bytes (function pointer 2 bytes + uint32_t 4 bytes). Total per scheduled task: 8 bytes on AVR when in pool plus static pointer.
+
+Global overhead:
+  - qman_total_tasks (uint8_t, 1 byte) incremented at static init time, used to check QMAN_WARN_STATIC_LIMIT once
+  - QMan instance: pool array of POOL_SIZE tasks + housekeeping (count, now, lastTaskStart, currentTask pointer, callback pointers)
+
+Flash overhead per QMAN_TASK: the function body plus a small QManCounter static object that increments qman_total_tasks before main().
+
+=== ERROR AND WARNING CODES ===
+1 QMAN_ERR_POOL_OVERFLOW - runtime: too many tasks running at once, pool is full
+2 QMAN_WARN_STATIC_LIMIT - startup: more QMAN_TASK definitions in code than POOL_SIZE
+3 QMAN_WARN_TICK_LIMIT   - startup: requested tick accuracy physically impossible on this hardware
+4 QMAN_WARN_DUTY_LATE    - runtime: a DUTY task overran its period
+
+Callbacks are set via qman.OnError() and qman.OnWarning(). The static limit and tick limit checks fire only once on first Go() call (guarded by a static bool).
+
+=== SUPPORTED PLATFORMS ===
+AVR (Uno, Nano, Mega, ATtiny88 with ATTinyCore or similar), STM32, ESP8266, ESP32, LGT8F. The library auto-detects architecture.
+
+=== CRITICAL USAGE RULES ===
+
+ALL VARIABLES INSIDE QMAN_TASK MUST BE STATIC IF USING QMAN_SLEEP/DUTY
+QMan does not allocate a stack for tasks. When a task yields (SLEEP/DUTY) and later resumes, the stack frame is gone. Any non-static local variable will contain garbage after resume.
+
+  CORRECT:
+    QMAN_TASK(myTask) {
+        QMAN_INIT {
+            static int counter = 0;
+        }
+        QMAN_LOOP {
+            counter++;
+            QMAN_SLEEP(100_ms);
+        }
     }
-}
 
-void setup() { QMAN_GO(blink); }
-void loop() { QMAN_TICK(); }
-'''
-
-## Configuration
-
-Change maximum number of tasks (default 16) BEFORE including QMan.h:
-
-'''
-cpp
-#define QMAN_POOL_SIZE 32
-#include <QMan.h>
-'''
-
-Change tick accuracy (default 32 microseconds):
-
-'''
-cpp
-#define QMAN_TICK_MAX_US 16  // Smaller = more accurate, more CPU
-#include <QMan.h>
-'''
-
-## Error Handling
-
-'''
-cpp
-void onWarning(uint8_t code) {
-    Serial.print("Warning: ");
-    Serial.println(code);
-}
-
-void onError(uint8_t code) {
-    Serial.print("Error: ");
-    Serial.println(code);
-}
-
-void setup() {
-    qman.OnWarning(onWarning);
-    qman.OnError(onError);
-}
-'''
-
-### Error Codes (enum QManError)
-
-| Code | Name | Meaning |
-|------|------|---------|
-| 1 | `QMAN_ERR_POOL_OVERFLOW` | Dynamic queue full. System may reboot. |
-| 2 | `QMAN_WARN_STATIC_LIMIT` | More tasks defined than POOL_SIZE |
-| 3 | `QMAN_WARN_TICK_LIMIT` | Requested tick accuracy not possible |
-| 4 | `QMAN_WARN_DUTY_LATE` | Task execution exceeded duty period |
-
-## SLEEP vs DUTY
-
-**SLEEP** (relative timing):
-- Waits fixed duration AFTER task work completes
-- Total period = work_time + sleep_time
-- DRIFTS over time
-
-**DUTY** (absolute timing):
-- Maintains exact period regardless of work time
-- Automatically reduces wait time if task took longer
-- NO DRIFT
-
-Example from QMan.h comments:
-
-'''
-cpp
-QMAN_TASK(slowTask) {
-    QMAN_LOOP {
-        doWork();              // Takes 100ms
-        QMAN_SLEEP(1000_ms);   // Total = 1100ms (drifts)
+  WRONG (will break on resume):
+    QMAN_TASK(myTask) {
+        QMAN_INIT {}
+        QMAN_LOOP {
+            int counter = 0;  // LOST after SLEEP!
+            counter++;
+            QMAN_SLEEP(100_ms);
+        }
     }
-}
 
-QMAN_TASK(preciseTask) {
-    QMAN_LOOP {
-        doWork();              // Takes 100ms
-        QMAN_DUTY(1000_ms);    // Total = 1000ms (exact)
-    }
-}
-'''
+If you don't use QMAN_SLEEP or QMAN_DUTY, you don't need static variables. The task runs once and disappears.
 
-## Internal Functions (from QMan.h)
+SLEEP/DUTY MUST NOT EXCEED ONE HOUR
+The internal 'now' counter has finite bit width. A sleep duration of over one hour can cause overflow artifacts. If you need longer delays, break them into multiple shorter SLEEP calls.
 
-| Function | Purpose |
-|----------|---------|
-| `qman.Setup()` | Sync internal clock with hardware (call in setup) |
-| `qman.Now()` | Get current internal time in ticks |
-| `qman.Started()` | Get when current task started |
-| `qman.Len()` | Get number of tasks in queue |
-| `qman.Clear()` | Remove all tasks and reset time |
-| `qman.Sync(delta)` | Manually add delta ticks |
+  SAFE: QMAN_SLEEP(3600000_ms);   // exactly 1 hour
+  WORKAROUND for longer sleeps: chain multiple SLEEP(3600000_ms) calls
 
-## Internal Types (from QMan.h)
+=== TESTING QMAN ===
 
-'''
-cpp
-struct QTime {
-    uint32_t ticks;  // Internal representation
-};
+QMan is uniquely testable among all cooperative multitasking libraries for microcontrollers. This follows directly from decoupling time advancement from scheduling decisions.
 
-struct Task {
-    TaskFunc func;    // Function pointer to task
-    uint32_t nextRun; // When to run (in ticks)
-};
-'''
+The manual form QMAN_TICK(N_tick) is the testing entry point:
+  QMAN_TICK(10_tick);   // advances time by exactly 10 ticks, runs scheduler
 
-## Key Internal Concepts
+Example test on hardware (Arduino sketch in setup()):
+  qman.Clear();
+  QMAN_GO(testTask);
+  QMAN_TICK(1_tick);    // run one tick
+  // assertions
+  Serial.println("PASS");
 
-- **Zero-stack coroutines:** Uses `static void* __resumeAddr` and goto for state saving
-- **Priority queue:** Tasks sorted by `nextRun` (most urgent at pool[count-1])
-- **Interrupt safety:** `QManGuard` RAII class disables interrupts during queue operations
-- **Time rollover safe:** Uses 32-bit unsigned arithmetic with signed difference comparison
+Tests can verify: basic scheduling, DUTY period, dynamic reprioritization, queue order, pool overflow, now overflow, task stop/restart, concurrent task interleaving.
 
-## Related Files in Repository
+=== DSL MACROS QUICK REFERENCE ===
+QMAN_TASK(name)         - define a task function named 'name' (returns void)
+QMAN_INIT               - one-time init block inside task (needed for SLEEP/DUTY)
+QMAN_LOOP               - repeating loop block inside task (needed for SLEEP/DUTY)
+QMAN_SLEEP(time)        - yield for 'time' using _ms or _us literal (needs INIT+LOOP)
+QMAN_DUTY(period)       - maintain fixed period with automatic compensation (needs INIT+LOOP)
+QMAN_GO(task)           - start task immediately
+QMAN_GO(task, delay)    - start task after delay (delay must use _ms, _us, or _tick)
+QMAN_TICK()             - call in loop() to drive the manager (auto time)
+QMAN_TICK(N_tick)       - manual tick for testing
 
-| File | Purpose |
-|------|---------|
-| `src/QMan.h` | Main header (macros, class definition, literals) |
-| `src/QMan.cpp` | Global instance `qman` and task counter |
-| `examples/AsyncLCD.ino` | Non-blocking LCD output demo |
-| `examples/SleepVsDuty.ino` | SLEEP vs DUTY comparison |
-| `examples/TestStability.ino` | Timing accuracy test |
-| `library.properties` | Arduino IDE metadata |
-| `README.md` | Full documentation |
-| `CHANGELOG.md` | Version history |
+User-configurable defines (set before #include <QMan.h>):
+  #define QMAN_POOL_SIZE 32   - change max concurrent tasks (default 16)
+  #define QMAN_TICK_MAX_US 16 - change tick granularity (default 32)
 
-## Links
+=== COMPARISON SUMMARY TABLE ===
 
-- Repository: https://github.com/IlVin/QMan
-- Author: Ilia Vinokurov
-- License: MIT
+Feature                        QMan        AceRoutine    TaskScheduler   FreeRTOS
+Context switch mechanism       goto        goto          function call   HW context
+Dynamic reprioritization       YES         NO            NO              YES (preemption)
+Period compensation (DUTY)     YES         NO            partial         YES
+Testable without hardware      YES         NO            NO              NO
+RAM per task (AVR)             8 bytes     16-28 bytes   low             100s-1000s bytes
+8-bit AVR support              YES         YES           YES             NO
+Learning curve                 Medium      Medium        Medium          High
+
+=== LICENSE ===
+MIT License. Free for commercial and open source projects.

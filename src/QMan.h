@@ -1,9 +1,9 @@
 /**
  * QMan (Queue Manager) - Ultra-lightweight cooperative task queue manager for Arduino.
  * Author: IlVin
- * Version: 1.0.2-beta
+ * Version: 1.0.7-beta
  * License: MIT
- * 
+ *
  * This library provides a way to run multiple tasks seemingly at the same time
  * without using a complex Operating System. It's perfect for small microcontrollers.
  */
@@ -13,7 +13,6 @@
 
 #include <Arduino.h>
 
-
 // --- Universal Atomic Guard ---
 // RAII-style: disable interrupts on creation, enable on destruction.
 // Safe for STM32, AVR, and others. Works even if 'return' is used.
@@ -21,7 +20,6 @@ struct QManGuard {
     QManGuard()  { noInterrupts(); }
     ~QManGuard() { interrupts();   }
 };
-
 
 // --- Includes ---
 #if defined(__AVR__)
@@ -31,7 +29,7 @@ struct QManGuard {
 #endif
 
 // --- Basic Types and Enums ---
-typedef bool (*TaskFunc)(); // true = закончить и удалить, false = спать/уступить
+typedef void (*TaskFunc)();
 typedef void (*ErrorCallback)(uint8_t errorCode);
 typedef void (*WarningCallback)(uint8_t errorCode);
 
@@ -59,13 +57,13 @@ struct QManCounter { QManCounter() { qman_total_tasks++; } };
 // Internal structure to store task data
 struct Task {
     TaskFunc func;      // What function to run
-    uint32_t nextRun;   // When to run it
+    uint32_t nextRun;   // When to run it (in system ticks)
 };
 
-// --- Setups ---
+// --- Hardware Setup ---
 #if defined(ARDUINO_ARCH_STM32)
   inline void qman_setup_hw() {
-    // Correct CMSIS names for STM32
+    // Enable DWT cycle counter on STM32
     if (!(DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk)) {
       CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
       DWT->CYCCNT = 0;
@@ -73,10 +71,9 @@ struct Task {
     }
   }
 #else
-  // Dummy function for AVR and others
+  // Dummy function for AVR and other platforms
   inline void qman_setup_hw() {}
 #endif
-
 
 // --- Time Conversion ---
 
@@ -104,6 +101,7 @@ struct Task {
   #define Q_TICKS_TO_US(t) (((uint32_t)(t) << QMAN_TICK_SHIFT) / (F_CPU / 1000000UL))
 
 #else
+  // Generic fallback for other platforms
   #define QMAN_TICK_SHIFT (QMAN_TICK_MAX_US >= 64 ? 6 : 5)
   #define Q_US(us) ((uint32_t)(us) >> QMAN_TICK_SHIFT)
   #define Q_TICKS_TO_US(t) ((uint32_t)(t) << QMAN_TICK_SHIFT)
@@ -123,11 +121,10 @@ struct QTime {
     explicit constexpr QTime(uint32_t t) : ticks(t) {}
 };
 
-// Literals: the only "legal" way to create QTime
+// User-defined literals: the only "legal" way to create QTime
 constexpr QTime operator"" _ms(unsigned long long ms) { return QTime(Q_MS(ms)); }
 constexpr QTime operator"" _us(unsigned long long us) { return QTime(Q_US(us)); }
 constexpr QTime operator"" _tick(unsigned long long t) { return QTime((uint32_t)t); }
-
 
 // --- Internal Time Functions ---
 inline uint32_t qman_get_delta_ticks() {
@@ -167,15 +164,21 @@ inline uint32_t qman_get_delta_ticks() {
  */
 #define QMAN_TASK(name) \
     static QManCounter QMAN_JOIN(qmc_, __COUNTER__); \
-    bool name()
+    void name()
 
 /**
  * Initialization block inside a task. 
  * Code here runs only ONCE when the task starts for the first time.
+ * On subsequent restarts (after STOP + GO), jumps directly to QMAN_LOOP.
  */
 #define QMAN_INIT \
     static void* __resumeAddr = nullptr; \
-    if (__resumeAddr) goto *__resumeAddr; \
+    if (__resumeAddr) { \
+        void* __tmp = __resumeAddr; \
+        __resumeAddr = &&__loop_entry; \
+        goto *__tmp; \
+    } \
+    __resumeAddr = &&__loop_entry; \
     if (true)
 
 /**
@@ -185,13 +188,6 @@ inline uint32_t qman_get_delta_ticks() {
 #define QMAN_LOOP \
     __loop_entry: \
     for (; (__resumeAddr = nullptr, true); )
-
-/**
- * Stop the task and reset it. 
- * Next time it starts, it will begin from the top of QMAN_LOOP.
- */
-#define QMAN_STOP \
-    do { __resumeAddr = &&__loop_entry; return true; } while (0)
 
 /**
  * Pause the task for a specific delay. 
@@ -206,15 +202,13 @@ inline uint32_t qman_get_delta_ticks() {
         __resumeAddr = (void*)&&QMAN_JOIN(L_, tag); \
         qman.Sync(qman_get_delta_ticks()); \
         qman.Sleep(qtime); \
-        return false; \
+        return; \
         QMAN_JOIN(L_, tag): ; \
     } while (0)
 
-// Исправленный "магический" выбор для 0 или 1 аргумента
+// Magic dispatch for 0 or 1 argument
 #define QMAN_GET_SLEEP_MACRO(_0, _1, NAME, ...) NAME
 #define QMAN_SLEEP(...) QMAN_GET_SLEEP_MACRO(0, ##__VA_ARGS__, QMAN_SLEEP_2, QMAN_SLEEP_1)(__VA_ARGS__)
-
-
 
 /**
  * Precise timing: ensures the task runs exactly every 'period' ticks, 
@@ -230,20 +224,19 @@ inline uint32_t qman_get_delta_ticks() {
         uint32_t elapsed = qman.Now() - qman.Started(); \
         uint32_t wait = (elapsed < qtime.ticks) ? (qtime.ticks - elapsed) : 0; \
         qman.Duty(QTime(wait)); \
-        return false; \
+        return; \
         QMAN_JOIN(L_, tag): ; \
     } while (0)
 
-    // --- Smart GO Macros ---
+// --- Smart GO Macros ---
 // Launch with time: QMAN_GO(task, 100_ms)
 #define QMAN_GO_2(task, qtime) qman.Go(task, qtime)
 // Launch immediately: QMAN_GO(task)
 #define QMAN_GO_1(task)        qman.Go(task)
 
-// Magic dispatcher for 1 or 2 arguments
+// Magic dispatch for 1 or 2 arguments
 #define QMAN_GET_GO_MACRO(_1, _2, NAME, ...) NAME
 #define QMAN_GO(...) QMAN_GET_GO_MACRO(__VA_ARGS__, QMAN_GO_2, QMAN_GO_1)(__VA_ARGS__)
-
 
 // --- The Core Manager Class ---
 
@@ -252,7 +245,7 @@ class QMan_Generic {
 private:
     Task pool[POOL_SIZE];       // Array of tasks waiting to run
     uint8_t count;              // Number of tasks currently in the pool
-    uint32_t now;               // Current internal time
+    uint32_t now;               // Current internal time (in system ticks)
     uint32_t lastTaskStart;     // When the current task was started
     TaskFunc currentTask;       // Pointer to the task being executed right now
     ErrorCallback onError;      // Function to call if something goes wrong
@@ -266,67 +259,83 @@ private:
     uint32_t pubMaxLatence;                // Published max jitter in ticks
 #endif
 
-    /**
-     * Internal: adds or moves a task in the queue.
-     * It uses a single-pass shift to be very fast.
-     */
-    // Вспомогательная функция для физического удаления по индексу
-    void remove_at(uint8_t idx) {
-        if (idx < count - 1) {
-            memmove(&pool[idx], &pool[idx + 1], sizeof(Task) * (count - idx - 1));
-        }
-        count--;
-    }
+    // Callback type for place-check functions used by schedule_task
+    typedef bool (*PlaceCheckFunc)(int32_t diff, uint32_t delay, uint32_t nextRun, uint32_t now);
 
-    void go(TaskFunc f, uint32_t delay) {
-        if (f == nullptr) return;
+    // Single helper for go/sleep/duty. The compiler will inline this with constant callbacks.
+    static inline uint8_t schedule_task(TaskFunc f, uint32_t delay, PlaceCheckFunc isRightPlace,
+                                     uint32_t& now, uint8_t& count, Task* pool) {
+        if (f == nullptr) return 0;
         QManGuard guard;
         uint32_t nextRun = now + delay;
 
-        for (uint8_t i = 0; i < count; i++) {
-            if (pool[i].func == f) { remove_at(i); break; }
-        }
+        if (count >= POOL_SIZE) return QMAN_ERR_POOL_OVERFLOW;
 
-        if (count >= POOL_SIZE) return;
-
-        // Ищем с ПРАВОГО края (HEAD)
         int8_t target = count;
+        int8_t dupIdx = -1;
+
         while (target > 0) {
             int32_t diff = (int32_t)(pool[target - 1].nextRun - nextRun);
-            if (delay > 0) {
-                if (diff > 0) break; // Таймер: встаем ПРАВЕЕ тех, кто в будущем
-            } else {
-                if (diff >= 0) break; // Событие: встаем ПРАВЕЕ тех, кто в будущем или сейчас
+
+            if (pool[target - 1].func == f) {
+                dupIdx = target - 1;
+                if (isRightPlace(diff, delay, nextRun, now)) {
+                    pool[dupIdx].nextRun = nextRun;
+                    return 0;
+                }
             }
+
+            if (isRightPlace(diff, delay, nextRun, now)) break;
             target--;
         }
 
-        if (target < count) {
-            memmove(&pool[target + 1], &pool[target], sizeof(Task) * (count - target));
+        if (dupIdx != -1) {
+            if (dupIdx < target) {
+                memmove(&pool[dupIdx], &pool[dupIdx + 1], sizeof(Task) * (target - dupIdx - 1));
+                target--;
+            } else if (dupIdx > target) {
+                memmove(&pool[target + 1], &pool[target], sizeof(Task) * (dupIdx - target));
+            }
+            pool[target] = {f, nextRun};
+        } else {
+            if (target < count) {
+                memmove(&pool[target + 1], &pool[target], sizeof(Task) * (count - target));
+            }
+            pool[target] = {f, nextRun};
+            count++;
         }
-        pool[target] = {f, nextRun};
-        count++;
+        return 0;
     }
 
-    // Вспомогательный метод для физического перемещения задачи внутри пула
-    void move_task(int8_t oldIdx, int8_t target, uint32_t nextRun) {
-        Task temp = pool[oldIdx];
-        temp.nextRun = nextRun;
-        if (oldIdx > target) {
-            memmove(&pool[target + 1], &pool[target], sizeof(Task) * (oldIdx - target));
-        } else if (oldIdx < target) {
-            memmove(&pool[oldIdx], &pool[oldIdx + 1], sizeof(Task) * (target - oldIdx));
-        }
-        pool[target] = temp;
+    // Place-check callbacks. Static inline so the compiler knows they are constant.
+    static inline bool go_place_timer(int32_t diff, uint32_t delay, uint32_t nextRun, uint32_t now) {
+        (void)delay; (void)nextRun; (void)now;
+        return diff > 0;
     }
+
+    static inline bool go_place_event(int32_t diff, uint32_t delay, uint32_t nextRun, uint32_t now) {
+        (void)delay; (void)nextRun; (void)now;
+        return diff >= 0;
+    }
+
+    static inline bool sleep_place(int32_t diff, uint32_t delay, uint32_t nextRun, uint32_t now) {
+        (void)delay; (void)nextRun; (void)now;
+        return diff > 0;
+    }
+
+    static inline bool duty_place(int32_t diff, uint32_t delay, uint32_t nextRun, uint32_t now) {
+        (void)delay;
+        return (diff > 0) || (diff == 0 && (int32_t)(nextRun - now) > 0);
+    }
+
 
 #ifdef QMAN_PROF
     void update_metrics(int32_t diff) {
         if ((uint32_t)(now - lastStatsReset) >= Q_MS(1000)) {
-            // Публикуем накопленное за прошлую секунду
+            // Publish accumulated data for the previous second
             pubLateCount = curLateCount;
             pubMaxLatence = curMaxLatence;
-            // Сбрасываем аккумуляторы
+            // Reset accumulators
             curLateCount = 0;
             curMaxLatence = 0;
             lastStatsReset = now;
@@ -338,67 +347,6 @@ private:
         }
     }
 #endif
-
-    void sleep(TaskFunc f, uint32_t delay) {
-        if (f == nullptr) return;
-        QManGuard guard;
-        uint32_t nextRun = now + delay;
-
-        int8_t oldIdx = -1;
-        for (uint8_t i = 0; i < count; i++) {
-            if (pool[i].func == f) { oldIdx = i; break; }
-        }
-        if (oldIdx == -1) return;
-
-        // Поиск нового места (всегда вежливый FIFO)
-        int8_t target = count;
-        while (target > 0) {
-            if ((int32_t)(pool[target - 1].nextRun - nextRun) > 0) break;
-            target--;
-        }
-
-        if (oldIdx < target) target--;
-        move_task(oldIdx, target, nextRun);
-    }
-
-    void duty(TaskFunc f, uint32_t delay) {
-        if (f == nullptr) return;
-        QManGuard guard;
-        uint32_t nextRun = now + delay;
-
-        int8_t oldIdx = -1;
-        for (uint8_t i = 0; i < count; i++) {
-            if (pool[i].func == f) { oldIdx = i; break; }
-        }
-        if (oldIdx == -1) return;
-
-#ifdef QMAN_PROF
-        int32_t diff_now = (int32_t)(nextRun - now);
-        update_metrics(diff_now);
-        static bool warningSent = false;
-        if (diff_now <= 0 && onWarning && !warningSent) {
-            warningSent = true;
-            onWarning(QMAN_WARN_DUTY_LATE);
-        }
-#endif
-
-        int8_t target = count;
-        while (target > 0) {
-            int32_t diff = (int32_t)(pool[target - 1].nextRun - nextRun);
-            if (diff > 0) break; // Целевое время позже нас
-
-            // Если попали в тот же такт И мы в будущем (вежливая DUTY)
-            if (diff == 0 && (int32_t)(nextRun - now) > 0) {
-                break; // Встаем ПРАВЕЕ всех в этом слоте (в голову)
-            }
-            target--;
-        }
-
-        if (oldIdx < target) target--;
-
-        // Обычная логика перемещения в массиве
-        move_task(oldIdx, target, nextRun); 
-    }
 
     void check_warnings() {
         static bool warningSent = false;
@@ -422,6 +370,9 @@ public:
     {
     }
 
+    /**
+     * Advance internal time by delta ticks. Called before Tick().
+     */
     void Sync(uint32_t delta) {
         QManGuard guard;
         now += delta;
@@ -441,17 +392,45 @@ public:
     /**
      * Start a task. If it's already in the pool, it will be rescheduled.
      */
-    void Go(TaskFunc f, QTime time) { check_warnings(); go(f, time.ticks); }
-    void Go(TaskFunc f) { check_warnings(); go(f, 0); }
+    void Go(TaskFunc f, QTime time) {
+        check_warnings();
+        uint8_t err = schedule_task(f, time.ticks, (time.ticks > 0) ? go_place_timer : go_place_event, now, count, pool);
+        if (err && onError) onError(err);
+    }
+    void Go(TaskFunc f) {
+        check_warnings();
+        uint8_t err = schedule_task(f, 0, go_place_event, now, count, pool);
+        if (err && onError) onError(err);
+    }
 
     /**
      * Used by the system to reschedule a task after QMAN_SLEEP.
      */
-    void Sleep(QTime time) { sleep(currentTask, time.ticks); }
-    void Duty(QTime time)  { duty(currentTask, time.ticks);  }
+    void Sleep(QTime time) {
+        uint8_t err = schedule_task(currentTask, time.ticks, sleep_place, now, count, pool);
+        if (err && onError) onError(err);
+    }
 
     /**
-     * The Heartbeat: Checks the queue and runs any task that is ready.
+     * Used by the system to reschedule a task after QMAN_DUTY.
+     */
+    void Duty(QTime time) {
+#ifdef QMAN_PROF
+        int32_t diff_now = (int32_t)((now + time.ticks) - now);
+        update_metrics(diff_now);
+        static bool warningSent = false;
+        if (diff_now <= 0 && onWarning && !warningSent) {
+            warningSent = true;
+            onWarning(QMAN_WARN_DUTY_LATE);
+        }
+#endif
+        uint8_t err = schedule_task(currentTask, time.ticks, duty_place, now, count, pool);
+        if (err && onError) onError(err);
+    }
+
+    /**
+     * The Heartbeat: Checks the queue and runs one ready task.
+     * Call this in loop(). Only ONE task runs per call.
      */
     void Tick() {
         static bool insideTick = false;
@@ -462,30 +441,19 @@ public:
         {
             QManGuard guard;
 
-            // Проверяем самую срочную (последнюю в массиве)
+            // Check the most urgent task (rightmost in the array)
             if ((int32_t)(now - pool[count - 1].nextRun) >= 0) {
-                currentTask = pool[count - 1].func; // Просто смотрим
-                taskToRun = currentTask;
-                lastTaskStart = now;
+                taskToRun = pool[count - 1].func;
+                count--;  // Remove task from queue before execution
             }
         }
 
         if (taskToRun) {
             insideTick = true;
-            bool shouldRemove = taskToRun(); // Выполняем
+            currentTask = taskToRun;
+            lastTaskStart = now;
+            taskToRun();
             insideTick = false;
-
-            if (shouldRemove) {
-                QManGuard guard;
-                // Ищем и удаляем, так как за время работы
-                // индекс мог измениться из-за GO в прерываниях
-                for (int8_t i = count - 1; i >= 0; i--) { // Поиск с конца чуть быстрее
-                    if (pool[i].func == taskToRun) {
-                        remove_at(i);
-                        break;
-                    }
-                }
-            }
             currentTask = nullptr;
         }
     }
@@ -513,12 +481,12 @@ extern QMan qman;
 
 // --- Tick Dispatcher Macros ---
 
-// Base TICK with delta ticks
+// TICK with explicit delta in ticks
 #define QMAN_TICK_1(delta) do { qman.Sync(delta); qman.Tick(); } while(0)
 // Auto TICK using hardware timers
 #define QMAN_TICK_0()      do { qman.Sync(qman_get_delta_ticks()); qman.Tick(); } while(0)
 
-// Magic to select between QMAN_TICK() and QMAN_TICK(delta)
+// Magic dispatch to select between QMAN_TICK() and QMAN_TICK(delta)
 #define QMAN_GET_TICK_MACRO(_0, _1, NAME, ...) NAME
 #define QMAN_TICK(...) QMAN_GET_TICK_MACRO(0, ##__VA_ARGS__, QMAN_TICK_1, QMAN_TICK_0)(__VA_ARGS__)
 

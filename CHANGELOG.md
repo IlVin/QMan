@@ -2,6 +2,50 @@
 
 All notable changes to the **QMan** library will be documented in this file.
 
+## [1.0.7-beta] - 2026-04-25
+### Changed
+- Task function signature changed from bool (*)() to void (*)().
+  QMAN_STOP is now a plain return without a value. Tick() no longer
+  inspects the return value of task functions.
+
+- Task is now removed from the queue BEFORE execution (via count-- in
+  Tick()) instead of after. This eliminates the need to search for the
+  task by pointer after it returns, and avoids index invalidation issues
+  caused by ISR-triggered queue modifications during task execution.
+
+- __resumeAddr = &&__loop_entry moved from QMAN_STOP to QMAN_INIT.
+  QMAN_STOP is now semantically equivalent to a plain return. On the
+  first run, QMAN_INIT saves the restart address automatically, so a
+  stopped task will skip initialization when restarted via QMAN_GO.
+
+### Added
+- schedule_task() — a single internal helper shared by go(), sleep(),
+  and duty(). It uses a compile-time constant place-check callback to
+  combine duplicate search and insertion point search into one pass
+  through the queue array.
+
+- Place-check callbacks (go_place_timer, go_place_event, sleep_place,
+  duty_place) — static inline functions that encode the insertion
+  semantics of each scheduling operation. The compiler inlines them,
+  eliminating indirect call overhead.
+
+### Optimized
+- Duplicate removal and insertion are now done in a single pass through
+  the queue array. In the best case (duplicate already at the correct
+  position), only nextRun is updated — no memmove required.
+
+- When a duplicate is found at a different position, a single memmove
+  shifts the elements between the old and new positions, instead of
+  doing two separate memmove calls (one for removal, one for insertion).
+
+- For a 16-element queue, worst-case critical section time reduced by
+  approximately 2x compared to the previous implementation.
+
+### Removed
+- remove_at() — replaced by inline logic in schedule_task().
+- move_task() — replaced by single memmove in schedule_task().
+- remove_task() — merged into schedule_task().
+
 ## [1.0.6-beta] - 2026-04-24
 ### Added
 - llms.txt
